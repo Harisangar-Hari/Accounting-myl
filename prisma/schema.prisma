@@ -1,0 +1,359 @@
+// General Ledger foundation — Phase 1
+// All monetary values are INTEGER CENTS. Never Float/Decimal for money.
+
+generator client {
+  provider = "prisma-client-js"
+}
+
+datasource db {
+  provider = "postgresql"
+  url      = env("DATABASE_URL")
+}
+
+model User {
+  id             String         @id @default(cuid())
+  email          String         @unique
+  passwordHash   String
+  name           String?
+  createdAt      DateTime       @default(now())
+  journalEntries JournalEntry[]
+}
+
+model Account {
+  id           String        @id @default(cuid())
+  code         String        @unique // e.g. "5100"
+  name         String // e.g. "Materials – Cement"
+  type         AccountType
+  normalBalance NormalBalance
+  isActive     Boolean       @default(true)
+  parentId     String?
+  parent       Account?      @relation("AccountTree", fields: [parentId], references: [id])
+  children     Account[]     @relation("AccountTree")
+  journalLines JournalLine[]
+  createdAt    DateTime      @default(now())
+
+  invoiceLineRevenue CustomerInvoiceLine[] @relation("InvoiceLineRevenue")
+  billLineExpense    SupplierBillLine[]    @relation("BillLineExpense")
+
+  @@index([type])
+}
+
+enum AccountType {
+  ASSET
+  LIABILITY
+  EQUITY
+  REVENUE
+  EXPENSE
+}
+
+enum NormalBalance {
+  DEBIT
+  CREDIT
+}
+
+model Customer {
+  id        String   @id @default(cuid())
+  code      String   @unique // e.g. "CUST-001", immutable after creation
+  name      String // display name / legal name
+  email     String?
+  phone     String?
+  address   String?
+  taxId     String? // VAT registration number
+  notes     String?
+  isActive  Boolean  @default(true)
+  jobs      Job[]
+  invoices  CustomerInvoice[]
+  payments  CustomerPayment[]
+  createdAt DateTime @default(now())
+  updatedAt DateTime @updatedAt
+
+  @@index([isActive])
+}
+
+model Job {
+  id         String        @id @default(cuid())
+  code       String        @unique // e.g. "JOB-2025-001"
+  name       String
+  isActive   Boolean       @default(true)
+  customerId String?
+  customer   Customer?     @relation(fields: [customerId], references: [id])
+  createdAt  DateTime      @default(now())
+  sites      Site[]
+  lines      JournalLine[]
+  invoiceLines CustomerInvoiceLine[] @relation("InvoiceLineJob")
+  billLines    SupplierBillLine[]    @relation("BillLineJob")
+}
+
+model Site {
+  id       String        @id @default(cuid())
+  code     String // unique per job, not globally
+  name     String
+  isActive Boolean       @default(true)
+  jobId    String
+  job      Job           @relation(fields: [jobId], references: [id])
+  lines    JournalLine[]
+  invoiceLines CustomerInvoiceLine[] @relation("InvoiceLineSite")
+  billLines    SupplierBillLine[]    @relation("BillLineSite")
+
+  @@unique([jobId, code])
+}
+
+model JournalEntry {
+  id          String        @id @default(cuid())
+  entryNo     String        @unique // e.g. "JE-2025-0001"
+  entryDate   DateTime
+  description String
+  reference   String?
+  status      EntryStatus   @default(DRAFT)
+  entryType   EntryType     @default(GENERAL) // GENERAL | EXPENSE
+  createdById String
+  createdBy   User          @relation(fields: [createdById], references: [id])
+  postedAt    DateTime?
+  lines       JournalLine[]
+  createdAt   DateTime      @default(now())
+  updatedAt   DateTime      @updatedAt
+
+  customerInvoice CustomerInvoice? @relation("InvoiceJournal")
+  customerPayment CustomerPayment? @relation("CustomerPaymentJournal")
+  supplierBill    SupplierBill?    @relation("BillJournal")
+  supplierPayment SupplierPayment? @relation("SupplierPaymentJournal")
+
+  @@index([entryDate])
+  @@index([status])
+}
+
+enum EntryStatus {
+  DRAFT
+  POSTED
+}
+
+enum EntryType {
+  GENERAL
+  EXPENSE
+}
+
+model JournalLine {
+  id             String       @id @default(cuid())
+  journalEntryId String
+  journalEntry   JournalEntry @relation(fields: [journalEntryId], references: [id], onDelete: Cascade)
+  accountId      String
+  account        Account      @relation(fields: [accountId], references: [id])
+  debitCents     Int          @default(0) // integer cents, >= 0
+  creditCents    Int          @default(0) // integer cents, >= 0
+  description    String?
+  jobId          String?
+  job            Job?         @relation(fields: [jobId], references: [id])
+  siteId         String?
+  site           Site?        @relation(fields: [siteId], references: [id])
+  lineNo         Int // ordering within entry
+
+  @@index([accountId])
+  @@index([journalEntryId])
+  @@index([jobId])
+}
+
+model EntrySequence {
+  year   Int @id
+  lastNo Int @default(0)
+}
+
+/* -------------------------------------------------------------------------
+ * Accounts Receivable / Accounts Payable (Phase 3)
+ *
+ * Documents are the source of truth for AR/AP; every document writes one
+ * balanced JournalEntry through writeEntry() inside the same transaction.
+ * ---------------------------------------------------------------------- */
+
+model Supplier {
+  id        String            @id @default(cuid())
+  code      String            @unique
+  name      String
+  email     String?
+  phone     String?
+  address   String?
+  taxId     String?
+  notes     String?
+  isActive  Boolean           @default(true)
+  bills     SupplierBill[]
+  payments  SupplierPayment[]
+  createdAt DateTime          @default(now())
+  updatedAt DateTime          @updatedAt
+
+  @@index([isActive])
+}
+
+enum InvoiceStatus {
+  OPEN
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum BillStatus {
+  OPEN
+  PARTIALLY_PAID
+  PAID
+  OVERDUE
+  CANCELLED
+}
+
+enum PaymentMethod {
+  CASH
+  BANK
+  CHEQUE
+}
+
+model CustomerInvoice {
+  id             String                  @id @default(cuid())
+  invoiceNo      String                  @unique
+  customerId     String
+  customer       Customer                @relation(fields: [customerId], references: [id])
+  invoiceDate    DateTime
+  dueDate        DateTime
+  description    String?
+  subtotalCents  Int
+  taxCents       Int                     @default(0)
+  totalCents     Int
+  paidCents      Int                     @default(0)
+  status         InvoiceStatus           @default(OPEN)
+  journalEntryId String                  @unique
+  journalEntry   JournalEntry            @relation("InvoiceJournal", fields: [journalEntryId], references: [id])
+  lines          CustomerInvoiceLine[]
+  allocations    CustomerPaymentAllocation[]
+  createdAt      DateTime                @default(now())
+  updatedAt      DateTime                @updatedAt
+
+  @@index([customerId])
+  @@index([status])
+  @@index([invoiceDate])
+}
+
+model CustomerInvoiceLine {
+  id               String          @id @default(cuid())
+  invoiceId        String
+  invoice          CustomerInvoice @relation(fields: [invoiceId], references: [id], onDelete: Cascade)
+  description      String
+  revenueAccountId String
+  revenueAccount   Account         @relation("InvoiceLineRevenue", fields: [revenueAccountId], references: [id])
+  amountCents      Int
+  taxCents         Int             @default(0)
+  jobId            String?
+  job              Job?            @relation("InvoiceLineJob", fields: [jobId], references: [id])
+  siteId           String?
+  site             Site?           @relation("InvoiceLineSite", fields: [siteId], references: [id])
+  lineNo           Int
+
+  @@index([invoiceId])
+}
+
+model CustomerPayment {
+  id             String                      @id @default(cuid())
+  paymentNo      String                      @unique
+  customerId     String
+  customer       Customer                    @relation(fields: [customerId], references: [id])
+  paymentDate    DateTime
+  amountCents    Int
+  method         PaymentMethod               @default(BANK)
+  reference      String?
+  notes          String?
+  journalEntryId String                      @unique
+  journalEntry   JournalEntry                @relation("CustomerPaymentJournal", fields: [journalEntryId], references: [id])
+  allocations    CustomerPaymentAllocation[]
+  createdAt      DateTime                    @default(now())
+
+  @@index([customerId])
+  @@index([paymentDate])
+}
+
+model CustomerPaymentAllocation {
+  id          String          @id @default(cuid())
+  paymentId   String
+  payment     CustomerPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  invoiceId   String
+  invoice     CustomerInvoice @relation(fields: [invoiceId], references: [id])
+  amountCents Int
+
+  @@unique([paymentId, invoiceId])
+  @@index([invoiceId])
+}
+
+model SupplierBill {
+  id             String                      @id @default(cuid())
+  billNo         String                      @unique
+  supplierRef    String?
+  supplierId     String
+  supplier       Supplier                    @relation(fields: [supplierId], references: [id])
+  billDate       DateTime
+  dueDate        DateTime
+  description    String?
+  subtotalCents  Int
+  taxCents       Int                         @default(0)
+  totalCents     Int
+  paidCents      Int                         @default(0)
+  status         BillStatus                  @default(OPEN)
+  journalEntryId String                      @unique
+  journalEntry   JournalEntry                @relation("BillJournal", fields: [journalEntryId], references: [id])
+  lines          SupplierBillLine[]
+  allocations    SupplierPaymentAllocation[]
+  createdAt      DateTime                    @default(now())
+  updatedAt      DateTime                    @updatedAt
+
+  @@index([supplierId])
+  @@index([status])
+  @@index([billDate])
+}
+
+model SupplierBillLine {
+  id               String       @id @default(cuid())
+  billId           String
+  bill             SupplierBill @relation(fields: [billId], references: [id], onDelete: Cascade)
+  description      String
+  expenseAccountId String
+  expenseAccount   Account      @relation("BillLineExpense", fields: [expenseAccountId], references: [id])
+  amountCents      Int
+  taxCents         Int          @default(0)
+  jobId            String?
+  job              Job?         @relation("BillLineJob", fields: [jobId], references: [id])
+  siteId           String?
+  site             Site?        @relation("BillLineSite", fields: [siteId], references: [id])
+  lineNo           Int
+
+  @@index([billId])
+}
+
+model SupplierPayment {
+  id             String                      @id @default(cuid())
+  paymentNo      String                      @unique
+  supplierId     String
+  supplier       Supplier                    @relation(fields: [supplierId], references: [id])
+  paymentDate    DateTime
+  amountCents    Int
+  method         PaymentMethod               @default(BANK)
+  reference      String?
+  notes          String?
+  journalEntryId String                      @unique
+  journalEntry   JournalEntry                @relation("SupplierPaymentJournal", fields: [journalEntryId], references: [id])
+  allocations    SupplierPaymentAllocation[]
+  createdAt      DateTime                    @default(now())
+
+  @@index([supplierId])
+  @@index([paymentDate])
+}
+
+model SupplierPaymentAllocation {
+  id          String          @id @default(cuid())
+  paymentId   String
+  payment     SupplierPayment @relation(fields: [paymentId], references: [id], onDelete: Cascade)
+  billId      String
+  bill        SupplierBill    @relation(fields: [billId], references: [id])
+  amountCents Int
+
+  @@unique([paymentId, billId])
+  @@index([billId])
+}
+
+model DocSequence {
+  key    String @id
+  lastNo Int    @default(0)
+}
