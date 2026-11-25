@@ -1,3 +1,7 @@
+database migration part 
+pg_dump -Fc -v -d "postgresql://postgres:admin@localhost:5432/accounting_myl" -f local_backup.bak   =>will take backup from the local 
+pg_restore -v -d "postgresql://neondb_owner:npg_ekx6cahGHC0A@ep-long-wildflower-be6tqnup-pooler.c-9.us-east-2.aws.neon.tech/neondb?sslmode=require&channel_binding=require" --no-owner --no-acl local_backup.bak       =>will restore the backup to neon cloud
+
 # Ledger — Construction Accounting (Phase 1)
 
 General Ledger foundation for a construction company. This is the double-entry core
